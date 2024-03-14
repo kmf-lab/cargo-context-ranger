@@ -42,7 +42,7 @@ cargo-context-ranger -p <path_to_rust_project> -f <full_module_path_to_function>
 
 #### Optional Parameter:
 
-- `-w, --window`: Window size in kilo characters (K chars) to limit the output. Defaults to 16K if not specified.
+- `-w, --window`: Window size in kilo characters (K chars) to limit the output. Defaults to 32K if not specified.
 
 Example command:
 
