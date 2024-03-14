@@ -1,9 +1,12 @@
+use std::error::Error;
 use structopt::StructOpt;
 use regex::Regex;
 use walkdir::WalkDir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use clipboard::{ClipboardContext, ClipboardProvider};
+
 
 #[derive(StructOpt)]
 struct Cli {
@@ -16,7 +19,7 @@ struct Cli {
     function_path: String,
 
     ///optional window size in K 1024 chars
-    #[structopt(short = "w", long="window", default_value = "16")] //default is 16K
+    #[structopt(short = "w", long="window", default_value = "32")] //default is 32K
     window_size_k: usize,
 
 }
@@ -86,6 +89,15 @@ fn find_files(folder_location: &Path, function_path: &str) -> Vec<(u8,PathBuf,St
     WalkDir::new(folder_location).into_iter().filter_map(Result::ok).filter_map(|entry|
         if entry.path().extension().map_or(false, |ext| ext == "rs") {
             let content = fs::read_to_string(entry.path()).expect("Unable to read file");
+
+            //to save prompt space we will trim every line of this file before using it
+            //at the same time we also do not put blank lines back in
+            let content = content.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<&str>>()
+                .join("\n");
+
             // Check if the file contains the function pattern
             if function_pattern.is_match(&content) {
                 // Check for path match or module declaration match
@@ -124,6 +136,7 @@ fn main() {
     let meta = true;
     if meta {
         result.push_str(" For the purposes of answering this question you are a helpful principal software engineer with a formal yet optimistic attitude. Here is the context available to complete the task.\n");
+        result.push_str( &format!("Keep your focus on the function: {:?}", &args.function_path));
 
         let rustc_output = Command::new("rustc")
             .arg("--version")
@@ -139,9 +152,11 @@ fn main() {
     }
 
     let extra_content_size =  result.len();
+    let source_folder = args.folder_location.join("src");
 
-    let mut all_files = find_files(&args.folder_location, &args.function_path);
-    //add the cargo file as priority 2
+
+    let mut all_files = find_files(&source_folder, &args.function_path);
+    //add the cargo file as priority 2 which is not found in the src folder
     let assumed_cargo_path = args.folder_location.join("Cargo.toml");
     if let Ok(body) = fs::read_to_string(&assumed_cargo_path) {
         all_files.push((2,assumed_cargo_path,body,None));
@@ -159,25 +174,56 @@ fn main() {
     let use_option = draft_counts+extra_content_size <= window_size_bytes;
 
 
-
     for (order,path,content,optional) in all_files {
+        result.push_str(&format!("\n\n\n////// Top of File: {} //////\n\n", path.display()));
         if use_option {
-            result.push_str(&format!("// ** // File: {}\n", path.display()));
 
             if let Some(op) = optional {
                 result.push_str(&op);
             } else {
                 result.push_str(&content);
             }
+
         } else {
             result.push_str(&content);
         }
+        result.push_str(&format!("\n\n////// End of File: {} //////\n\n\n", path.display()));
+
     }
 
     //trim the results to the window size
     if result.len() > window_size_bytes {
         result = result.chars().take(window_size_bytes).collect();
     }
-    println!("{}", result)
+    println!("{}", &result);
+    //Kb written
+    println!("{}KBs of content", result.len() / 1024);
+
+    // At the very end, after constructing the result string:
+
+    //write result to my clipboard
+
+    { //wayland clipboard if you have it
+        use wl_clipboard_rs::copy::{MimeType, Options, Source};
+        let opts = Options::new();
+        let _ = opts.copy(Source::Bytes(result.clone().into_bytes().into()), MimeType::Autodetect);
+    }
+
+    //other x11 clipboard if you have it
+    let ctx: Result<ClipboardContext, Box<dyn std::error::Error>> = ClipboardProvider::new();
+    match ctx {
+        Ok(mut ctx) => {
+            // Here, `set_contents` is clearly operating on a ClipboardContext
+            match ctx.set_contents(result.clone()) {
+                Ok(a) => {println!("Result has been copied to the clipboard. {:?}",a);
+                          //we must read the clip board back to ensure it worked
+                          ctx.get_contents().map(|s| println!("Clipboard contents: {}KB", s.len()/1024)).ok();
+                },
+                Err(e) => eprintln!("Failed to copy to the clipboard: {}", e),
+            }
+        },
+        Err(e) => { } ,
+    }
+
 
 }

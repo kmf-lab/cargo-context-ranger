@@ -3,9 +3,29 @@ name = "cargo-context-ranger"
 version = "0.0.1"
 edition = "2021"
 
+documentation = "https://docs.rs/cargo-context-ranger/0.0.1/steady_state/"
+
+description = "Quickly grab your rust context for building LLM prompts to help"
+license = "MIT"
+
+repository = "https://github.com/kmf-lab/cargo-context-ranger"
+
+
+[profile.release]
+opt-level = 'z' # optimize for size
+lto = true # link time optimization
+codegen-units = 1 # only one codegen unit to reduce binary size
+panic = 'abort' # no unwinding
+strip = 'symbols' # strip symbols
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# NOTE: build may require: sudo apt-get install libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+#                          this is due to support for writing the promte to the clipboard
+
 [dependencies]
+clipboard = "0.5.0"
+wl-clipboard-rs = "0.8.1" #  wayland clipboard
 structopt = "0.3.26"
 regex = "1.10.3"
 walkdir = "2.5.0"
