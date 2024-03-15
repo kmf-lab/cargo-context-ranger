@@ -32,7 +32,7 @@ This command fetches and installs `cargo-context-ranger` along with all necessar
 With `cargo-context-ranger` installed, you can invoke it as follows:
 
 ```bash
-cargo-context-ranger -p <path_to_rust_project> -f <full_module_path_to_function> [-w <window_size_in_k_chars>]
+cargo-context-ranger -p <path_to_rust_project> -f <full_module_path_to_function> -w <window_size_in_k_chars>
 ```
 
 #### Parameters:
@@ -47,8 +47,9 @@ cargo-context-ranger -p <path_to_rust_project> -f <full_module_path_to_function>
 Example command:
 
 ```bash
-cargo-context-ranger -p /path/to/myproject -f src/lib::my_module::my_function -w 500
+cargo-context-ranger -p /path/to/myproject -f lib::my_module::my_function -w 16
 ```
+Note that -p will assume . by default, -f will assume "main" by default and -w is 32 by default
 
 ## How It Works
 
