@@ -24,6 +24,10 @@ struct Cli {
 
 }
 
+//TODO: we need N levels of scanning for better order placement
+//TODO: we need java support
+//TODO: we need a boolean argument for clipboard use (also clipboard needs cleanup)
+
 
 fn extract_function_body(content: &str, function_name: &str) -> String {
     let function_pattern = Regex::new(&format!(r"fn {}\([^\)]*\) \{{", regex::escape(function_name))).unwrap();
