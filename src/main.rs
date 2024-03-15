@@ -37,35 +37,55 @@ fn extract_function_body(content: &str, function_name: &str) -> String {
     "".to_string()
 }
 
+fn replace_blocks_not_calling_target_function(content: &str, def_pos: Option<usize>, target_function_caller_pattern: &Regex ) -> String {
 
-fn modify_function_bodies(file_path: &PathBuf, function_name: &str) -> String {
-    let content = fs::read_to_string(file_path).expect("Unable to read file");
-    let function_pattern = Regex::new(r"fn\s+(\w+)\s*\((.*?)\)\s*\{([\s\S]*?)\}").expect("bad regex");
-    let mut modified_content = content.clone();
+    let mut brace_depth = 0;
+    let mut last_index = 0;
+    let mut result = String::new();
+    let mut keep_safe = false;
 
-    // Extract all functions and their bodies
-    let mut function_calls = Vec::new();
-    for cap in function_pattern.captures_iter(&content) {
-        let name = cap.get(1).unwrap().as_str();
-        let body = cap.get(3).unwrap().as_str();
+    for (index, char) in content.char_indices() {
+        match char {
+            '{' => {
+                brace_depth += 1;
+            },
+            '}' => {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    let block_content = &content[last_index..index+1];
 
-        // Check if the function body calls the target function
-        if body.contains(&format!("{}(", function_name)) || body.contains(&format!("{} (", function_name)) {
-            function_calls.push(name);
+                    // if this is the definition of the function or we call it then keep
+                    if keep_safe || target_function_caller_pattern.is_match(block_content) {
+                        // Keep the original block
+                        result.push_str(block_content);
+                        keep_safe = false;
+                    } else {
+                        // Replace the block content if it doesn't call the target function
+                        result.push_str("{...}");
+                    }
+
+                    last_index = index + 1;
+                }
+            },
+            _ => {}
+        }
+
+        // Append content outside of blocks
+        if brace_depth == 0 && index >= last_index {
+            result.push(char);
+            last_index = index + 1;
+            if let Some(def_pos) = def_pos {
+                if index==def_pos {
+                    keep_safe = true;
+                }
+            }
         }
     }
 
-    // Replace bodies of functions that don't call the target function and aren't called by it
-    for cap in function_pattern.captures_iter(&content) {
-        let name = cap.get(1).unwrap().as_str();
-        let whole_match = cap.get(0).unwrap().as_str();
+    // Append any remaining content after the last block
+    result.push_str(&content[last_index..]);
 
-        if !function_calls.contains(&name) && name != function_name {
-            let replacement = format!("fn {}(...) {{ ... }}", name);
-            modified_content = modified_content.replace(whole_match, &replacement);
-        }
-    }
-    modified_content
+    result
 }
 
 
@@ -73,58 +93,69 @@ fn modify_function_bodies(file_path: &PathBuf, function_name: &str) -> String {
 /// this can include false positives for corner cases but should not miss the case we want.
 /// extra context and 'examples' would actually be helpful to the LLM.
 /// Returns all rs files with (Ordering, Path, TrimmedBody, Optional Full Body)
-fn find_files(folder_location: &Path, function_path: &str) -> Vec<(u8,PathBuf,String,Option<String>)> {
+fn find_source_files(folder_location: &Path, function_path: &str) -> Vec<(u8, PathBuf, String, Option<String>)> {
     let parts: Vec<&str> = function_path.split("::").collect();
-    let function_name = if let Some(last) = parts.last() {
-        last
-    } else {
-        "main" //look for main if function not provided
+    let function_name = if let Some(last) = parts.last() {     last
+                                                  } else {     "main" //look for main if function_path not provided
     };
-
     let module_parts = &parts[..parts.len() - 1]; // Exclude the function name part
-    let function_pattern = Regex::new(&format!(r"fn\s+{}\s*\(", function_name)).unwrap();
 
-    // Prepare regex patterns for each module part to check for `mod XX;` declarations
-    let module_decl_patterns: Vec<Regex> = module_parts
+
+    let target_function_def_pattern = Regex::new(&format!(r"fn\s+{}\s*[<(]", function_name)).unwrap();
+
+    let target_function_caller_pattern = Regex::new(&format!(r"[.:]{}\s*[:<\(]", function_name)).unwrap();
+
+
+    let all_target_module_patterns: Vec<(String, Regex)> = module_parts
         .iter()
-        .map(|mod_name| Regex::new(&format!(r"\bmod\s+{}\s*;", mod_name)).unwrap())
+        .map(|mod_name| (mod_name.to_string(), Regex::new(&format!(r"\bmod\s+{}\s*;", mod_name)).unwrap() ))
         .collect();
 
-    WalkDir::new(folder_location).into_iter().filter_map(Result::ok).filter_map(|entry|
-        if entry.path().extension().map_or(false, |ext| ext == "rs") {
-            let content = fs::read_to_string(entry.path()).expect("Unable to read file");
+    WalkDir::new(folder_location).into_iter()
+        .filter_map(Result::ok) // calls the ok method on each Result in the iterator, discarding any Err values
+        .filter_map(|entry|
+            //either it ends in the right extension for source files or we return false
+            if entry.path().extension().map_or(false, |ext| ext == "rs") {
+                let content = fs::read_to_string(entry.path()).expect("Unable to read file"); //should not happen as we checked ok
 
-            //to save prompt space we will trim every line of this file before using it
-            //at the same time we also do not put blank lines back in
-            let content = content.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .collect::<Vec<&str>>()
-                .join("\n");
+                //to save prompt space we will trim every line of this file before using it
+                //at the same time we also do not put blank lines back in, confirmed this saves tokens
+                let content = content.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
 
-            // Check if the file contains the function pattern
-            if function_pattern.is_match(&content) {
-                // Check for path match or module declaration match
-                if module_parts.iter().all(|&mod_name| entry.path().display().to_string().contains(mod_name)) ||
-                    module_decl_patterns.iter().any(|re| re.is_match(&content)) {
-                    println!("Function '{}' found in file: {:?}", function_name, entry.path());
-                    Some((0,entry.clone().into_path(),modify_function_bodies(&entry.into_path(), function_name),Some(content)))
+                // Check if the file contains our target function pattern
+                if let Some(thing) = target_function_def_pattern.find(&content) {
+                    // Check for path match or module declaration match, our function must be
+                    // in a mod defined here or in a mod in the path, all mods must be found
+                    // due to mod ordering this may allow false positives and that is ok
+                    if all_target_module_patterns.iter().all(|(mod_name,re)|
+                            re.is_match(&content) || entry.path().display().to_string().contains(mod_name)
+                        ) {
+
+                        println!("Function '{}' found in file: {:?} at: {}", function_name, entry.path(), thing.start());
+                        let summary = replace_blocks_not_calling_target_function(&content, Some(thing.start()), &target_function_caller_pattern);
+                        Some((0,entry.clone().into_path(),summary,Some(content)))
+                    } else {
+                        //same function name but not in the right modules, could be a great example
+                        //this is a lower priority than our immediate context
+                        Some((3,entry.into_path(),content,None))
+                    }
                 } else {
-                    //same function name but not in the right modules, could be a great example
-                    //this is a lower priority than our immediate context
-                    Some((3,entry.into_path(),content,None))
+                    //somewhere on this page we found a call to our function so this is a higher priority.
+                    if target_function_caller_pattern.is_match(&content) {
+                        let summary = replace_blocks_not_calling_target_function(&content, None, &target_function_caller_pattern);
+                        Some((1,entry.into_path(),summary,Some(content)))
+                    } else {
+                        //does not contain and does not call our target function so this is the lowest priority
+                        Some((4,entry.into_path(),content,None))
+                    }
                 }
             } else {
-                if content.contains(&format!("{}(", function_name)) || content.contains(&format!("{} (", function_name)) {
-                    Some((1,entry.into_path(),content,None))
-                } else {
-                    //does not contain and does not call our target function so this is the lowest priority
-                    Some((4,entry.into_path(),content,None))
-                }
+                None
             }
-        } else {
-            None
-        }
     ).collect()
 }
 
@@ -133,14 +164,13 @@ fn main() {
     let args = Cli::from_args();
     let window_size_bytes = args.window_size_k * 1024;
 
-
     //collect all the results into a single string
-    let mut result = String::new();
+    let mut output_for_the_llm = String::new();
 
-    let meta = true;
-    if meta {
-        result.push_str(" For the purposes of answering this question you are a helpful principal software engineer with a formal yet optimistic attitude. Here is the context available to complete the task.\n");
-        result.push_str( &format!("Keep your focus on the function: {:?}", &args.function_path));
+    let meta = true; //TODO: we may want a command line to turn this off in some cases.
+    if meta {  //other data beyond the source which may be helpful
+        output_for_the_llm.push_str(" For the purposes of answering this question you are a helpful principal software engineer with a formal yet optimistic attitude. Here is the context available to complete the task.\n");
+        output_for_the_llm.push_str( &format!("Keep your focus on the function: {:?}", &args.function_path));
 
         let rustc_output = Command::new("rustc")
             .arg("--version")
@@ -150,67 +180,33 @@ fn main() {
         let rustc_version = String::from_utf8_lossy(&rustc_output.stdout);
 
         println!("cargo:rustc-env=RUSTC_VERSION={}", rustc_version.trim());
-        result.push_str(&format!("You are running on: {}\n", std::env::consts::OS));
-        result.push_str(&format!("cargo:rustc-env=RUSTC_VERSION={}\n", rustc_version.trim()));
-
-    }
-
-    let extra_content_size =  result.len();
-    let source_folder = args.folder_location.join("src");
-
-
-    let mut all_files = find_files(&source_folder, &args.function_path);
-    //add the cargo file as priority 2 which is not found in the src folder
-    let assumed_cargo_path = args.folder_location.join("Cargo.toml");
-    if let Ok(body) = fs::read_to_string(&assumed_cargo_path) {
-        all_files.push((2,assumed_cargo_path,body,None));
-    } else {
-        result.push_str("Unable to find Cargo.toml, this is probably a new project\n");
+        output_for_the_llm.push_str(&format!("You are running on: {}\n", std::env::consts::OS));
+        output_for_the_llm.push_str(&format!("cargo:rustc-env=RUSTC_VERSION={}\n", rustc_version.trim()));
     }
 
 
-    all_files.sort();
-    //if the total bytes is small enough up all 2's we can use the full file we will
-    let draft_counts:usize = all_files.iter()
-                     .filter(|(order,_,_,_)| *order <= 2)
-                     .map(|(_,_,content,optional)| if let Some(op) = optional {op.len()} else {content.len()}  )
-                     .sum();
-    let use_option = draft_counts+extra_content_size <= window_size_bytes;
+    let extra_content_size =  output_for_the_llm.len();
 
-
-    for (order,path,content,optional) in all_files {
-        result.push_str(&format!("\n\n\n////// Top of File: {} //////\n\n", path.display()));
-        if use_option {
-
-            if let Some(op) = optional {
-                result.push_str(&op);
-            } else {
-                result.push_str(&content);
-            }
-
-        } else {
-            result.push_str(&content);
-        }
-        result.push_str(&format!("\n\n////// End of File: {} //////\n\n\n", path.display()));
-
-    }
+    let all_files = gather_sorted_vec_of_bodies(&args, &mut output_for_the_llm);
+    join_all_bodies(window_size_bytes, &mut output_for_the_llm, extra_content_size, &all_files, 2);
 
     //trim the results to the window size
-    if result.len() > window_size_bytes {
-        result = result.chars().take(window_size_bytes).collect();
+    if output_for_the_llm.len() > window_size_bytes {
+        output_for_the_llm = output_for_the_llm.chars().take(window_size_bytes).collect();
     }
-    println!("{}", &result);
+    println!("{}", &output_for_the_llm);
     //Kb written
-    println!("{}KBs of content", result.len() / 1024);
+    println!("{}KBs of content", output_for_the_llm.len() / 1024);
 
     // At the very end, after constructing the result string:
 
-    //write result to my clipboard
+    //write result to my clipboard, TODO: this is messy and needs a boolean to enable
+    //we just try both clipboards and ignore the errors, a bit smelly
 
     { //wayland clipboard if you have it
         use wl_clipboard_rs::copy::{MimeType, Options, Source};
         let opts = Options::new();
-        let _ = opts.copy(Source::Bytes(result.clone().into_bytes().into()), MimeType::Autodetect);
+        let _ = opts.copy(Source::Bytes(output_for_the_llm.clone().into_bytes().into()), MimeType::Autodetect);
     }
 
     //other x11 clipboard if you have it
@@ -218,7 +214,7 @@ fn main() {
     match ctx {
         Ok(mut ctx) => {
             // Here, `set_contents` is clearly operating on a ClipboardContext
-            match ctx.set_contents(result.clone()) {
+            match ctx.set_contents(output_for_the_llm.clone()) {
                 Ok(a) => {println!("Result has been copied to the clipboard. {:?}",a);
                           //we must read the clip board back to ensure it worked
                           ctx.get_contents().map(|s| println!("Clipboard contents: {}KB", s.len()/1024)).ok();
@@ -230,4 +226,42 @@ fn main() {
     }
 
 
+}
+
+fn gather_sorted_vec_of_bodies(args: &Cli, result: &mut String) -> Vec<(u8, PathBuf, String, Option<String>)> {
+    let source_folder = args.folder_location.join("src");
+    let mut all_files = find_source_files(&source_folder, &args.function_path);
+    //add the cargo file as priority 2 which is not found in the src folder
+    let assumed_cargo_path = args.folder_location.join("Cargo.toml");
+    if let Ok(body) = fs::read_to_string(&assumed_cargo_path) {
+        all_files.push((2, assumed_cargo_path, body, None));
+    } else {
+        result.push_str("Unable to find Cargo.toml, this is probably a new project\n");
+    }
+    all_files.sort();//must be sorted so the high priority comes first
+    all_files
+}
+
+fn join_all_bodies(window_size_bytes: usize, result: &mut String, extra_content_size: usize, all_files: &Vec<(u8, PathBuf, String, Option<String>)>, goal: u8) {
+
+    //if it turns out our context window is large we can rollback our source summary and use full files.
+    let draft_counts: usize = all_files.iter()
+        .filter(|(order, _, _, _)| *order <= goal)
+        .map(|(_, _, content, optional)| if let Some(op) = optional { op.len() } else { content.len() })
+        .sum();
+    let use_optional_full_unmodified_source_file = draft_counts + extra_content_size <= window_size_bytes;
+
+    for (_, path, content, optional) in all_files {
+        result.push_str(&format!("\n\n\n////// Top of File: {} //////\n\n", path.display()));
+        if use_optional_full_unmodified_source_file {
+            if let Some(op) = optional {
+                result.push_str(&op);
+            } else {
+                result.push_str(&content);
+            }
+        } else {
+            result.push_str(&content);
+        }
+        result.push_str(&format!("\n\n////// End of File: {} //////\n\n\n", path.display()));
+    }
 }
